@@ -21,6 +21,8 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
+#include "tracelog.h"
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read		= do_sync_read,
@@ -369,6 +371,36 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 	file->f_pos = pos;
 }
 
+/* Function for writing log both for read and write
+ * op_str should be one of "READV", "WRITEV",
+ * func_str is to be used in printk messsages
+ */
+static void fs_tracelog_read_write(const char *op_str, const char *func_name, unsigned int fd,
+	const char __user *buf, size_t count, struct file *file, ssize_t ret)
+{
+	char *tracelog_msg;
+	unsigned long i_ino = 0;
+	dev_t s_dev = MKDEV(0, 0);
+	if (file) {
+		i_ino = file->f_dentry->d_inode->i_ino;
+		s_dev = file->f_dentry->d_inode->i_sb->s_dev;
+	}
+	tracelog_msg = kasprintf(GFP_KERNEL, "%s %u %lu %d:%d 0x%p %u %d",
+		op_str, fd, i_ino,
+		MAJOR(s_dev), MINOR(s_dev),
+		buf, count, ret);
+	if (!tracelog_msg) {
+		printk(KERN_WARNING "fs tracelog: %s - no memory\n", func_name);
+	} else {
+		int error = fs_tracelog_add(1, &tracelog_msg);
+		kfree(tracelog_msg);
+		if (error == -ENOMEM)
+			printk(KERN_WARNING "fs tracelog: %s - no memory\n", func_name);
+		else if (error == -ERESTARTSYS)
+			printk(KERN_WARNING "fs tracelog: %s - interrupted\n", func_name);
+	}
+}
+
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	struct file *file;
@@ -381,7 +413,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 		ret = vfs_read(file, buf, count, &pos);
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
+
 	}
+	if (fs_tracelog_enabled())
+		fs_tracelog_read_write("READ", "sys_read", fd, buf, count, file, ret);
 
 	return ret;
 }
@@ -400,6 +435,8 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
 	}
+	if (fs_tracelog_enabled())
+		fs_tracelog_read_write("WRITE", "sys_write", fd, buf, count, file, ret);
 
 	return ret;
 }
@@ -660,6 +697,8 @@ out:
 		else
 			fsnotify_modify(file->f_path.dentry);
 	}
+
+
 	return ret;
 }
 
@@ -689,6 +728,74 @@ ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 
 EXPORT_SYMBOL(vfs_writev);
 
+/* Function for writing log both for readv and writev
+ * type should be one of READ, WRITE
+ * op_str should be one of "READV", "WRITEV",
+ * func_str is to be used in printk messsages
+ */
+static void fs_tracelog_readv_writev(int type, const char *op_str, const char *func_str,
+	unsigned long fd, struct file *file, const struct iovec __user *vec,
+	unsigned long vlen, int ret)
+{
+	int i;
+	int error = 0;
+	unsigned long log_lines;
+	char **msgs;
+	struct iovec iovstack[UIO_FASTIOV];
+	struct iovec *iov = iovstack;
+	unsigned long i_ino = 0;
+	dev_t s_dev = MKDEV(0, 0);
+
+	if (file) {
+		i_ino = file->f_dentry->d_inode->i_ino;
+		s_dev = file->f_dentry->d_inode->i_sb->s_dev;
+	}
+
+	vlen = rw_copy_check_uvector(type, vec, vlen, ARRAY_SIZE(iovstack), iovstack, &iov);
+	if (vlen < 0)
+		printk(KERN_WARNING "fs tracelog: %s - error while copying vector\n", func_str);
+	else {
+		log_lines = vlen + 2; // +2 for first and last log line
+		msgs = kmalloc(log_lines*sizeof(char *), GFP_KERNEL);
+		if (!msgs)
+			printk(KERN_WARNING "fs tracelog: %s - no memory\n", func_str);
+		else {
+			for (i = 0; i < log_lines; ++i)
+				msgs[0] = NULL;
+
+			msgs[0] = kasprintf(GFP_KERNEL, "%s_START %lu %lu %d:%d %lu",
+				op_str, fd, i_ino,
+				MAJOR(s_dev), MINOR(s_dev),
+				vlen);
+			if (!msgs[0])
+				error = -ENOMEM;
+			for (i = 1; !error && i <= vlen; ++i) {
+				msgs[i] = kasprintf(GFP_KERNEL, "%s_ENTRY 0x%p %u",
+					op_str,
+					iov[i].iov_base, iov[i].iov_len);
+				if (!msgs[i])
+					error = -ENOMEM;
+			}
+			if (!error) {
+				msgs[log_lines-1] = kasprintf(GFP_KERNEL, "%s_END %d",
+					op_str, ret);
+			}
+			if (error) {
+				printk(KERN_WARNING "fs tracelog: %s - no memory\n", func_str);
+			} else {
+				error = fs_tracelog_add(log_lines, msgs);
+				if (error == -ENOMEM)
+					printk(KERN_WARNING "fs tracelog: %s - no memory\n", func_str);
+				else if (error == -ERESTARTSYS)
+					printk(KERN_WARNING "fs tracelog: %s - interrupted\n", func_str);
+			}
+			for (i = 0; i < log_lines; ++i)
+				kfree(msgs[i]);
+			kfree(msgs);
+		}
+	}
+}
+
 SYSCALL_DEFINE3(readv, unsigned long, fd, const struct iovec __user *, vec,
 		unsigned long, vlen)
 {
@@ -707,6 +814,10 @@ SYSCALL_DEFINE3(readv, unsigned long, fd, const struct iovec __user *, vec,
 	if (ret > 0)
 		add_rchar(current, ret);
 	inc_syscr(current);
+
+	if (fs_tracelog_enabled())
+		fs_tracelog_readv_writev(READ, "READV", "sys_readv", fd, file, vec, vlen, ret);
+
 	return ret;
 }
 
@@ -728,6 +839,10 @@ SYSCALL_DEFINE3(writev, unsigned long, fd, const struct iovec __user *, vec,
 	if (ret > 0)
 		add_wchar(current, ret);
 	inc_syscw(current);
+
+	if (fs_tracelog_enabled())
+		fs_tracelog_readv_writev(WRITE, "WRITEV", "sys_writev", fd, file, vec, vlen, ret);
+		
 	return ret;
 }
 

@@ -8,6 +8,7 @@ struct fs_struct {
 	rwlock_t lock;
 	int umask;
 	int in_exec;
+	volatile int logging; /* bool flag, does not require locking */
 	struct path root, pwd;
 };
 

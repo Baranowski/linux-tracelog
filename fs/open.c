@@ -33,6 +33,7 @@
 #include <linux/ima.h>
 
 #include "internal.h"
+#include "tracelog.h"
 
 int vfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
@@ -1059,6 +1060,24 @@ long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
 			} else {
 				fsnotify_open(f->f_path.dentry);
 				fd_install(fd, f);
+				if (fs_tracelog_enabled()) {
+					char *tracelog_msg;
+					tracelog_msg = kasprintf(GFP_KERNEL, "OPEN %d %lu %d:%d %s",
+						fd, f->f_dentry->d_inode->i_ino,
+						MAJOR(f->f_dentry->d_inode->i_sb->s_dev),
+						MINOR(f->f_dentry->d_inode->i_sb->s_dev),
+						tmp);
+					if (!tracelog_msg) {
+						printk(KERN_WARNING "fs tracelog: do_sys_open - no memory\n");
+					} else {
+						int error = fs_tracelog_add(1, &tracelog_msg);
+						kfree(tracelog_msg);
+						if (error == -ENOMEM)
+							printk(KERN_WARNING "fs tracelog: do_sys_open - no memory\n");
+						else if (error == -ERESTARTSYS)
+							printk(KERN_WARNING "fs tracelog: do_sys_open - interrupted\n");
+					}
+				}
 			}
 		}
 		putname(tmp);
@@ -1141,6 +1160,9 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	struct files_struct *files = current->files;
 	struct fdtable *fdt;
 	int retval;
+	int i_ino = 0;
+	dev_t device = MKDEV(0,0);
+
 
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
@@ -1149,6 +1171,10 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	filp = fdt->fd[fd];
 	if (!filp)
 		goto out_unlock;
+
+	i_ino = filp->f_dentry->d_inode->i_ino;
+	device = filp->f_dentry->d_inode->i_sb->s_dev;
+
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	FD_CLR(fd, fdt->close_on_exec);
 	__put_unused_fd(files, fd);
@@ -1162,11 +1188,29 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 		     retval == -ERESTART_RESTARTBLOCK))
 		retval = -EINTR;
 
+finish:
+	if (fs_tracelog_enabled()) {
+		char *tracelog_msg;
+		tracelog_msg = kasprintf(GFP_KERNEL, "CLOSE %u %lu %d:%d",
+			fd, i_ino, MAJOR(device), MINOR(device));
+		if (!tracelog_msg) {
+			printk(KERN_WARNING "fs tracelog: sys_close - no memory\n");
+		} else {
+			int error = fs_tracelog_add(1, &tracelog_msg);
+			kfree(tracelog_msg);
+			if (error == -ENOMEM)
+				printk(KERN_WARNING "fs tracelog: sys_close - no memory\n");
+			else if (error == -ERESTARTSYS)
+				printk(KERN_WARNING "fs tracelog: sys_close - interrupted\n");
+		}
+	}
+
 	return retval;
 
 out_unlock:
 	spin_unlock(&files->file_lock);
-	return -EBADF;
+	retval = -EBADF;
+	goto finish;
 }
 EXPORT_SYMBOL(sys_close);
 

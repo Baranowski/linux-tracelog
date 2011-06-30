@@ -112,6 +112,8 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
 		fs->pwd = old->pwd;
 		path_get(&old->pwd);
 		read_unlock(&old->lock);
+
+		fs->logging = old->logging;
 	}
 	return fs;
 }
@@ -150,6 +152,7 @@ struct fs_struct init_fs = {
 	.users		= 1,
 	.lock		= __RW_LOCK_UNLOCKED(init_fs.lock),
 	.umask		= 0022,
+	.logging	= 0,
 };
 
 void daemonize_fs_struct(void)

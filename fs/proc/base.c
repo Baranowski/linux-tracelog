@@ -2549,6 +2549,37 @@ static int proc_pid_personality(struct seq_file *m, struct pid_namespace *ns,
 	return 0;
 }
 
+#define TRACELOG_CONTROL_WRITE_MAX 2
+
+static ssize_t proc_tracelog_control_write(struct file *file,
+					  const char __user *buf,
+					  size_t count,
+					  loff_t *ppos)
+{
+	struct task_struct *task;
+	char local_buff[TRACELOG_CONTROL_WRITE_MAX];
+
+	if (count == 0 || count > TRACELOG_CONTROL_WRITE_MAX)
+		return -EINVAL;
+	if (copy_from_user(local_buff, buf, count))
+		return -EFAULT;
+	if (local_buff[0] < '0' || local_buff[0] > '1')
+		return -EINVAL;
+	if (count > 1 && local_buff[1] != '\n')
+		return -EINVAL;
+	task = get_proc_task(file->f_path.dentry->d_inode);
+	if (!task)
+		return -ESRCH;
+	task_lock(task);
+	task->fs->logging = local_buff[0] - '0';
+	task_unlock(task);
+	return count;
+}
+
+static const struct file_operations proc_tracelog_control_operations = {
+	.write = proc_tracelog_control_write,
+};
+
 /*
  * Thread groups
  */
@@ -2629,6 +2660,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_TASK_IO_ACCOUNTING
 	INF("io",	S_IRUGO, proc_tgid_io_accounting),
 #endif
+	REG("tracelog_control", S_IWUSR, proc_tracelog_control_operations),
 };
 
 static int proc_tgid_base_readdir(struct file * filp,

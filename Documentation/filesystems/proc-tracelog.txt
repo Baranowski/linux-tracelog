@@ -1,0 +1,119 @@
+Unless otherwise stated, all objects, functions and structures mentioned in this
+document have been defined in fs/tracelog.c. This, obviously, does not include
+symbols already present in the kernel.
+
+The log
+=======
+
+The log is implemented as a list of structs fs_tracelog_t:
+struct fs_tracelog_t {
+	struct list_head list;
+	const char* msg;
+};
+
+The msg field is kmalloc'ed buffor containing single message. The length is
+message length + 1 (for the terminal '\0').
+
+Adding or removing messages at the beginning or end of the list (and these are
+the only places where we shall do that) works in O(1).
+
+Reading the log
+---------------
+
+Reading the /proc/tracelog/log file has been implemented with seq_file. Normally
+finding message at a given position in the list would work in O(n). Since this
+is what seq_start does, I introduced the following improvement:
+
+The fstlcache_* variables are a simple (1-entry) cache.
+fstlcache_pos - is the position of the most recent message read from the log.
+fstlcache_v - pointer to the corresponding entry in the list.
+fstlcache_dirty - flag set when the values above are no longer valid.
+
+When searching for the i-th element in the list, we choose the nearest one from
+among: (beginning of the list), (end of the list), (the cached element). We then
+walk through the list to the i-th element.
+
+If there are no simultaneous reads from the log, seeking for the entry will work
+in O(1). This assumption is quite safe, since only the root may read the log.
+Should the need arise, however, the cache could be extended.
+
+Synchronization
+===============
+
+To read or write any log-related variables (the "fs_tracelog_" or "fstlcache_"
+prefixes) with the exception of "fs_tracelog_flag" and the "logging" flag of
+fs_struct, it is required to lock the "fs_tracelog_mutex" semaphore. It is hence
+required, among other things, in order to read and write to the log. In case of
+reading, the semaphore is locked in seq_start and unlocked in seq_stop.
+
+Error handling
+==============
+
+I have identified three possible solutions in case of unsuccessful attempt to add
+a message to the log:
+
+(1) Make the syscall return error code and revert all the modifications that
+might have been made before the error.
+
+This requires good understanding of the syscalls being logged and is thus
+error-prone. What's more, it would also require costly updates of the patch
+whenever the upstream code of the syscalls is modified.
+
+(2) Move all the error-prone operations to another routine and call them at the
+very beginning of the syscall. This would provide API similar to
+radix_tree_preload.
+
+There is no problem with integration with the syscall source code. However, the
+memory would be used inefficiently since the length of the message is not known
+before the original kernel code is executed.
+
+(3) Report error in the log, without affecting the value returned.
+
+This solution also avoids the problem of integration with syscall source code.
+It also seems reasonable to make the logging layer transparent to the user -
+after all the error did not occur in the syscall itself, but when trying to
+record it.
+
+I chose the (3) solution. If there is an error for any of readv/writev
+operations, none of the operations are logged.
+
+Efficiency
+==========
+
+The tests were conducted with a full log, so every write operation required
+removal of the oldest entries. Since I did not have a dedicated machine for the
+tests, I had to resort to using qemu. Obviously, this means the results reported
+below might be very far from what they would be on a physical machine.
+
+benchmark.cpp
+-------------
+
+The enclosed program tools/tracelog-bench/benchmark.cpp runs two tests:
+(1) Ten times: open a file, write 1024 bytes, read them, close the file.
+(2) Ten times: open a file,
+               writev in 8 operations 128 bytes each,
+               readv in 8 operations 128 bytes each,
+               close the file
+
+Both tests are conducted 20 times. The program output has been redirected to a
+file.
+
+With logging enabled:
+[       10xopen+write+read+close ]  mean:    0.02154s    variance:    0.00000
+[     10xopen+writev+readv+close ]  mean:    0.02189s    variance:    0.00000
+
+Wyniki logging disabled:
+[       10xopen+write+read+close ]  mean:    0.02913s    variance:    0.00000
+[     10xopen+writev+readv+close ]  mean:    0.98188s    variance:    0.00001
+
+Copying a file
+--------------
+
+I have also measured the time of copying a file, with random contents, 10M big.
+The operation has been conducted 10 times.
+
+Times (in seconds) with logging disabled:
+00.72 00.73 00.80 00.76 00.80 01.23 00.79 00.77 00.82 00.75
+
+Times (in seconds) with logging enabled:
+00.87 00.87 00.90 00.92 00.90 00.92 00.87 00.82 00.88 00.83
