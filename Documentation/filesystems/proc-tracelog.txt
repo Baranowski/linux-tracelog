@@ -1,3 +1,18 @@
+(Notice March 2015)
+
+This project was written in 2011 as one in a series of class assignments for
+the "Advanced Operating Systems" course at the University of Warsaw, Poland.
+
+It creates several files in the /proc/tracelog/ directory:
+  /log - read-only log file describing all calls to the read(v) and write(v)
+         syscalls
+  /enabled - write "1" to turn logging on
+  /clear - write "1" to clear the log
+  /entry_limit - write an integer to set the log size
+  /clear_last - write an integer n to remove the last n entries
+
+(End of notice)
+
 Unless otherwise stated, all objects, functions and structures mentioned in this
 document have been defined in fs/tracelog.c. This, obviously, does not include
 symbols already present in the kernel.
